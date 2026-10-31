@@ -1,0 +1,83 @@
+name: Python CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Python Flask application
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          else
+            echo "No requirements.txt found; installing verified Flask runtime dependency"
+            python -m pip install "Flask>=3.0,<4.0"
+          fi
+
+      - name: Validate Python syntax
+        run: python -m compileall -q .
+
+      - name: Run automated tests (if any)
+        run: |
+          if find . -path './.git' -prune -o \( -name 'test_*.py' -o -name '*_test.py' \) -print | grep -q .; then
+            echo "Automated tests found. Installing pytest and running tests."
+            python -m pip install pytest
+            python -m pytest -q
+          else
+            echo "No automated tests found in the repository. Skipping test execution."
+          fi
+
+      - name: Validate Flask application import
+        run: |
+          python - <<'PY'
+          import app
+
+          # Confirm the app object exists and routes are registered without
+          # starting a persistent server or making external network requests.
+          assert hasattr(app, "app"), "Flask app object not found"
+          rules = {rule.rule for rule in app.app.url_map.iter_rules()}
+          assert "/" in rules, "Root route '/' is not registered"
+          assert "/api/release-notes" in rules, "API route is not registered"
+
+          # Exercise the root route through the test client (no real server).
+          client = app.app.test_client()
+          response = client.get("/")
+          assert response.status_code == 200, f"GET / returned {response.status_code}"
+
+          # Validate the XML parsing helper with a minimal in-memory Atom feed.
+          sample = (
+              b"<?xml version='1.0' encoding='utf-8'?>"
+              b"<feed xmlns='http://www.w3.org/2005/Atom'>"
+              b"<entry><title>Sample</title><updated>2024-01-01T00:00:00Z</updated>"
+              b"<link rel='alternate' href='https://example.com'/><content>Body</content></entry>"
+              b"</feed>"
+          )
+          entries = app.parse_release_notes(sample)
+          assert len(entries) == 1 and entries[0]["title"] == "Sample"
+
+          print("Flask application imported and validated successfully.")
+          PY
